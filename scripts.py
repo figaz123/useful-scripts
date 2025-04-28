@@ -1,3 +1,8 @@
+#code for automate listing files in your directories. Using os and datetime library.
+# before use, install the dependencies on python
+# !pip install os
+# !pip install datetime
+
 import os
 from datetime import datetime as dt
 
@@ -59,7 +64,7 @@ for interest in interest_folders:
 
                     if detected:
                         if detected not in structured_files[interest][level]:
-                            structured_files[interest][level][detected] = set()  # Use set instead of list
+                            structured_files[interest][level][detected] = set()  # Use set to hinder duplicate
                         structured_files[interest][level][detected].add(file_name)  # Add to set
 
 # Write output to a file
