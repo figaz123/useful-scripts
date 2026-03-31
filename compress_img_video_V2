@@ -1,0 +1,144 @@
+import os
+import subprocess
+import multiprocessing
+import gc
+from concurrent.futures import ThreadPoolExecutor
+from PIL import Image
+
+# ================= CONFIGURATION =================
+INPUT_FOLDER = "." 
+OUTPUT_FOLDER = "Compressed" 
+
+# Hardware Acceleration: Set to True if you have an Nvidia GPU. 
+USE_NVIDIA_GPU = False 
+
+# Leave 2 CPU cores free to prevent the laptop from becoming sluggish
+AVAILABLE_CORES = max(1, (os.cpu_count() or 2) - 2) 
+
+# Image settings: 85 is the sweet spot for reducing size without destroying quality
+IMAGE_QUALITY = 85 
+
+# Supported file types
+VALID_IMAGE_EXTS = {'jpg', 'jpeg', 'png', 'webp'}
+VALID_VIDEO_EXTS = {'mp4', 'mkv', 'mov', 'avi'}
+# =================================================
+
+def setup():
+    if not os.path.exists(OUTPUT_FOLDER):
+        os.makedirs(OUTPUT_FOLDER)
+        print(f"Created output directory: {OUTPUT_FOLDER}")
+
+def should_skip_file(input_path, output_path):
+    # 1. If it doesn't exist at all, we obviously shouldn't skip it
+    if not os.path.exists(output_path):
+        return False
+        
+    # 2. If the file exists but is 0 bytes (crashed/interrupted previous run), overwrite it
+    if os.path.getsize(output_path) == 0:
+        os.remove(output_path)
+        return False
+        
+    # 3. If the original file was modified more recently than the compressed file, re-compress it
+    original_time = os.path.getmtime(input_path)
+    compressed_time = os.path.getmtime(output_path)
+    if original_time > compressed_time:
+        return False
+        
+    # If it passes all tests, it is safe to skip
+    return True
+
+def compress_image(input_path, output_path, ext):
+    try:
+        with Image.open(input_path) as img:
+            if ext == 'png':
+                img.save(output_path, format='PNG', optimize=True)
+            elif ext == 'webp':
+                img.save(output_path, format='WEBP', quality=IMAGE_QUALITY, method=6)
+            else:
+                # Convert any non-standard color modes to RGB for JPEG compatibility
+                if img.mode != "RGB":
+                    img = img.convert("RGB")
+                img.save(output_path, format='JPEG', quality=IMAGE_QUALITY, optimize=True)
+            
+            # Explicitly clear image from RAM
+            del img 
+                
+        print(f"[Image] Compressed: {os.path.basename(input_path)}")
+    except Exception as e:
+        print(f"[Error] Failed to compress image {input_path}: {e}")
+
+def compress_video(input_path, output_path):
+    if USE_NVIDIA_GPU:
+        cmd = [
+            'ffmpeg', '-y', '-hwaccel', 'cuda', '-i', input_path,
+            '-c:v', 'hevc_nvenc', '-preset', 'slow', '-cq', '28', 
+            '-c:a', 'aac', '-b:a', '128k', output_path
+        ]
+    else:
+        cmd = [
+            'ffmpeg', '-y', '-i', input_path,
+            '-c:v', 'libx265', '-crf', '28', '-preset', 'fast',
+            '-threads', str(AVAILABLE_CORES), 
+            '-c:a', 'aac', '-b:a', '128k', output_path
+        ]
+    
+    try:
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT, check=True)
+        print(f"[Video] Compressed: {os.path.basename(input_path)}")
+    except subprocess.CalledProcessError:
+        print(f"[Error] Failed to compress video {input_path}. Make sure ffmpeg is installed.")
+    except FileNotFoundError:
+        print("[Error] ffmpeg not found. Please place ffmpeg.exe in the script folder or add it to PATH.")
+
+def process_image_file(filename):
+    input_path = os.path.join(INPUT_FOLDER, filename)
+    output_path = os.path.join(OUTPUT_FOLDER, filename)
+    ext = filename.lower().split('.')[-1]
+    
+    if should_skip_file(input_path, output_path):
+        return
+
+    compress_image(input_path, output_path, ext)
+    gc.collect()
+
+def main():
+    setup()
+    
+    # Categorize files safely using absolute path checks
+    all_files = [f for f in os.listdir(INPUT_FOLDER) if os.path.isfile(os.path.join(INPUT_FOLDER, f))]
+    
+    image_files = [f for f in all_files if f.lower().split('.')[-1] in VALID_IMAGE_EXTS]
+    video_files = [f for f in all_files if f.lower().split('.')[-1] in VALID_VIDEO_EXTS]
+    
+    if not image_files and not video_files:
+        print("No valid images or videos found in this folder.")
+        return
+
+    print(f"System Check: Utilizing {AVAILABLE_CORES} cores. Garbage Collection ACTIVE.")
+
+    # Process Images in Parallel
+    if image_files:
+        print(f"\n--- Processing {len(image_files)} Images ---")
+        with ThreadPoolExecutor(max_workers=AVAILABLE_CORES) as executor:
+            executor.map(process_image_file, image_files)
+
+    # Process Videos Sequentially (to prevent FFmpeg from oversubscribing the CPU)
+    if video_files:
+        print(f"\n--- Processing {len(video_files)} Videos ---")
+        for filename in video_files:
+            input_path = os.path.join(INPUT_FOLDER, filename)
+            
+            # Force video outputs to be .mp4
+            new_filename = os.path.splitext(filename)[0] + '.mp4'
+            output_path = os.path.join(OUTPUT_FOLDER, new_filename)
+            
+            if should_skip_file(input_path, output_path):
+                continue
+                
+            compress_video(input_path, output_path)
+            gc.collect()
+            
+    print("\nCompression complete. All files saved to the output directory.")
+
+if __name__ == "__main__":
+    main()
